@@ -11,7 +11,7 @@
 #
 # Ключи: -y (не задавать вопросов), --no-rollback (не откатывать при неудачной проверке)
 
-SCRIPT_VERSION="1.2"
+SCRIPT_VERSION="1.3"
 
 # ---- проверенные версии (обновлять вместе) ---------------------------------
 ENGINE_VER="1.14.2-r12"
@@ -197,6 +197,8 @@ do_rollback() {
 # ---- отчёт -----------------------------------------------------------------
 redact() {
     sed -E \
+        -e "s#^(podkop\.[^.]+\.(outbound_json|proxy_string|urltest_proxy_links|urltest_fallback_links|selector_proxy_links|interface_private_key|wireguard_[a-z_]*key[a-z_]*))=.*#\1='***'#" \
+        -e 's#("(id|uuid|password|psk|private_key|pre_shared_key|public_key|short_id|auth_str|obfs_password)"[[:space:]]*:[[:space:]]*")[^"]*#\1***#g' \
         -e 's#(vless|vmess|trojan|ss|ssr|hysteria2|hy2|tuic|socks[45]?|anytls|naive\+https)://[^ "'"'"']*#\1://***#g' \
         -e 's#[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}#<uuid>#g' \
         -e 's#((password|passwd|psk|private_key|public_key|short_id|pbk|sid|obfs-password|auth)[" =:]+)[^ ",&]+#\1***#gI' \
