@@ -1,6 +1,6 @@
 #!/bin/sh
 # Установка podkop-engine (сборка sing-box для podkop) + обновление podkop
-# для Xiaomi AX3000T на OpenWrt 24.10 с уже настроенным podkop.
+# для Xiaomi AX3000T на OpenWrt 24.10 (opkg) и 25.12 (apk) с уже настроенным podkop.
 #
 #   wget -O /root/pe.sh https://raw.githubusercontent.com/markiitwo/podkop-engine-installer/main/install.sh
 #   sh /root/pe.sh            установить / обновить
@@ -11,24 +11,26 @@
 #
 # Ключи: -y (не задавать вопросов), --no-rollback (не откатывать при неудачной проверке)
 
-SCRIPT_VERSION="1.3"
+SCRIPT_VERSION="2.0"
 
 # ---- проверенные версии (обновлять вместе) ---------------------------------
-ENGINE_VER="1.14.2-r12"
-ENGINE_ARCH="aarch64_cortex-a53"
-ENGINE_FILE="podkop-engine_${ENGINE_VER}_openwrt_${ENGINE_ARCH}.ipk"
-ENGINE_URL="https://github.com/FiyeroT/podkop-engine/releases/download/v${ENGINE_VER}/${ENGINE_FILE}"
-ENGINE_SHA="e06cbcd3e1e91d657ab86f817a7cf012b522c5591e809fe9f49f13f6f04b58b0"
+ENGINE_VER="1.14.2-r14"
+ENGINE_ARCH="${ENGINE_ARCH:-aarch64_cortex-a53}"
+ENGINE_BASE="https://github.com/FiyeroT/podkop-engine/releases/download/v${ENGINE_VER}"
+ENGINE_SHA_IPK="04a97287d556562c28304bc5f246d855a240d1a800e3830f693c363c7b71d643"
+ENGINE_SHA_APK="8956c62696ee292902960cbdb198339527d5d7946a677cf26616afc8632a1f63"
 ENGINE_INSTALLED_KB=22400
 
-PODKOP_VER="0.7.23"
+PODKOP_VER="0.7.24"
 PODKOP_BASE="https://github.com/itdoginfo/podkop/releases/download/${PODKOP_VER}"
-PODKOP_FILE="podkop-v${PODKOP_VER}-r1-all.ipk"
-PODKOP_SHA="7dc233d3d5fd98245109b7a9539609d7f98f8eea3422c4a867a74f2b0aec55e0"
-LUCI_FILE="luci-app-podkop-v${PODKOP_VER}-r1-all.ipk"
-LUCI_SHA="5f9edd1da5498056ab5d1ddb42d21317d3c412e0d9fe3a93ffaa1b37961037d6"
-RU_FILE="luci-i18n-podkop-ru-${PODKOP_VER}.ipk"
-RU_SHA="e92aea80d6fbfbb890853f0af2fde05afdffc585710e40ccccc74061173681e4"
+# opkg (OpenWrt 24.10)
+PODKOP_IPK="podkop-v${PODKOP_VER}-r1-all.ipk";             PODKOP_SHA_IPK="34e8413ccdc3bc843ed6ee943dbe0a646908494a123b4ee342229ab1c79131b2"
+LUCI_IPK="luci-app-podkop-v${PODKOP_VER}-r1-all.ipk";      LUCI_SHA_IPK="25adc2a91169872748ead4b70a27a4cd57de9601d291d97b263071595cbfcc3c"
+RU_IPK="luci-i18n-podkop-ru-${PODKOP_VER}.ipk";            RU_SHA_IPK="a2b0bfba9ede5cf8c939d38f0f2d36068918ae6582982c8e91dd675b461f42f2"
+# apk (OpenWrt 25.12)
+PODKOP_APK="podkop-${PODKOP_VER}-r1.apk";                  PODKOP_SHA_APK="a444a784a7dc22b2ba17336b773f75b27861daf3fb358fea21b31935a975318e"
+LUCI_APK="luci-app-podkop-${PODKOP_VER}-r1.apk";           LUCI_SHA_APK="96d662b2f19e514e3486e9cddf545af1ce104d518884e3c61e8f4030c6f52746"
+RU_APK="luci-i18n-podkop-ru-${PODKOP_VER}.apk";            RU_SHA_APK="898b89b7abee2348c950b210b8fc347a268ccba3b06664c68eb4df4e3da1740b"
 
 PODKOP_DEPS="curl jq kmod-nft-tproxy coreutils-base64 bind-dig ca-bundle"
 STATS_PKGS="luci-app-vnstat2 vnstati2 vnstat2 luci-app-nlbwmon nlbwmon"
@@ -40,6 +42,7 @@ REPORT=/tmp/podkop-engine-report.txt
 MIXED_PROXY="http://127.0.0.1:4534"
 TEST_URL="https://www.gstatic.com/generate_204"
 
+PM=""               # opkg | apk — выбирается в detect_pm
 ASSUME_YES=0
 AUTO_ROLLBACK=1
 CRITICAL=0          # 1 = старый sing-box уже снят, при сбое нужен откат
@@ -64,12 +67,12 @@ err()  { printf "  ${C_R}✗${C_0} %s\n" "$*"; log "ERROR: $*"; }
 # команда с выводом только в лог
 run() { log "\$ $*"; "$@" >> "$LOG" 2>&1; rc=$?; [ $rc -ne 0 ] && log "(код $rc)"; return $rc; }
 
-# opkg update/download с повторами; при неудаче — через VPN podkop
-opkg_net() {
-    for try in 1 2; do run opkg "$@" && return 0; sleep 3; done
+# сетевые команды менеджера пакетов с повторами; при неудаче — через VPN podkop
+pm_net() {
+    for try in 1 2; do run "$PM" "$@" && return 0; sleep 3; done
     if proxy_up; then
-        log "opkg $* через podkop"
-        ( export http_proxy="$MIXED_PROXY" https_proxy="$MIXED_PROXY"; run opkg "$@" ) && return 0
+        log "$PM $* через podkop"
+        ( export http_proxy="$MIXED_PROXY" https_proxy="$MIXED_PROXY"; run "$PM" "$@" ) && return 0
     fi
     return 1
 }
@@ -111,9 +114,85 @@ on_signal() {
     fail "Установка прервана."
 }
 
+# ---- менеджер пакетов: opkg (24.10) или apk (25.12) ------------------------
+detect_pm() {
+    if command -v apk >/dev/null 2>&1 && [ -d /etc/apk ]; then PM=apk; PKG_EXT=apk
+    elif command -v opkg >/dev/null 2>&1; then PM=opkg; PKG_EXT=ipk
+    else PM=""; PKG_EXT=""; fi
+    if [ "$PM" = apk ]; then
+        ENGINE_FILE="podkop-engine_${ENGINE_VER}_openwrt_${ENGINE_ARCH}.apk"; ENGINE_SHA="$ENGINE_SHA_APK"
+        PODKOP_FILE="$PODKOP_APK"; PODKOP_SHA="$PODKOP_SHA_APK"
+        LUCI_FILE="$LUCI_APK";     LUCI_SHA="$LUCI_SHA_APK"
+        RU_FILE="$RU_APK";         RU_SHA="$RU_SHA_APK"
+    else
+        ENGINE_FILE="podkop-engine_${ENGINE_VER}_openwrt_${ENGINE_ARCH}.ipk"; ENGINE_SHA="$ENGINE_SHA_IPK"
+        PODKOP_FILE="$PODKOP_IPK"; PODKOP_SHA="$PODKOP_SHA_IPK"
+        LUCI_FILE="$LUCI_IPK";     LUCI_SHA="$LUCI_SHA_IPK"
+        RU_FILE="$RU_IPK";         RU_SHA="$RU_SHA_IPK"
+    fi
+    ENGINE_URL="$ENGINE_BASE/$ENGINE_FILE"
+}
+
+# установлен ли пакет именно с этим именем (apk: sing-box-tiny не считается за sing-box)
+pkg_installed() {
+    if [ "$PM" = apk ]; then apk list -I "$1" 2>/dev/null | grep -q "^$1-[0-9]"
+    else opkg status "$1" 2>/dev/null | grep -q '^Status:.* installed'; fi
+}
+pkg_ver() {
+    if [ "$PM" = apk ]; then apk list -I "$1" 2>/dev/null | awk -v n="$1" 'index($1, n"-")==1 {print substr($1, length(n)+2); exit}'
+    else opkg status "$1" 2>/dev/null | sed -n 's/^Version: //p'; fi
+}
+pkg_arch_ok() {
+    if [ "$PM" = apk ]; then [ "$(apk --print-arch 2>/dev/null)" = "$ENGINE_ARCH" ]
+    else opkg print-architecture 2>/dev/null | grep -q " $ENGINE_ARCH "; fi
+}
+pkg_update() { pm_net update; }
+pkg_add_repo() { # поставить из репозитория OpenWrt
+    if [ "$PM" = apk ]; then run apk add "$@"; else run opkg install "$@"; fi
+}
+pkg_add_file() { # поставить/обновить из скачанного файла
+    if [ "$PM" = apk ]; then run apk add --allow-untrusted "$@"; else run opkg install "$@"; fi
+}
+pkg_remove() {
+    if [ "$PM" = apk ]; then run apk del "$@"; else run opkg remove "$@"; fi
+}
+pkg_fetch() { # скачать пакет из репозитория в каталог: pkg_fetch каталог имя
+    if [ "$PM" = apk ]; then pm_net fetch -o "$1" "$2"
+    else ( cd "$1" && pm_net download "$2" ); fi
+}
+# engine вместо sing-box. opkg: снять старый, поставить новый. apk: одной транзакцией, но сначала
+# убрать из /etc/apk/world старые записи (иначе конфликт: !sing-box блокирует сам engine,
+# а sing-box из локального файла намертво закрепляется после отката)
+engine_install() { # engine_install файл старый_пакет
+    if [ "$PM" = apk ]; then
+        cp /etc/apk/world "$BACKUP/apk-world.before" 2>/dev/null
+        sed -i -E '/^(sing-box|sing-box-tiny)(><.*)?$/d; /^!(podkop-engine|sing-box|sing-box-tiny)$/d' /etc/apk/world
+        log "apk world: $(tr '\n' ' ' < /etc/apk/world)"
+        if ! run apk add --allow-untrusted "$1"; then
+            cp "$BACKUP/apk-world.before" /etc/apk/world 2>/dev/null
+            return 1
+        fi
+    else
+        if [ "$2" != podkop-engine ]; then
+            run opkg remove --force-depends "$2" || return 1
+            info "$2 снят"
+        fi
+        run opkg install "$1"
+    fi
+}
+# обычный sing-box вместо engine: из файла или из репозитория
+engine_revert() { # engine_revert [файл]
+    if [ "$PM" = apk ]; then
+        if [ -n "$1" ]; then run apk add --allow-untrusted "$1" '!podkop-engine'
+        else run apk add sing-box-tiny '!podkop-engine'; fi
+    else
+        pkg_installed podkop-engine && run opkg remove --force-depends podkop-engine
+        if [ -n "$1" ]; then run opkg install "$1"
+        else pm_net update; run opkg install sing-box-tiny; fi
+    fi
+}
+
 # ---- утилиты ---------------------------------------------------------------
-pkg_ver() { opkg status "$1" 2>/dev/null | sed -n 's/^Version: //p'; }
-pkg_installed() { opkg status "$1" 2>/dev/null | grep -q '^Status:.* installed'; }
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; } # $1 >= $2
 mem_avail_mb() { awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo; }
 free_kb() { df -k "$1" 2>/dev/null | awk 'NR==2{print $4}'; }
@@ -124,6 +203,7 @@ proxy_up() { # слушает ли mixed-вход podkop
 }
 
 proxy_test() { # работает ли VPN через podkop
+    command -v curl >/dev/null 2>&1 || return 1
     code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 8 --max-time 15 -x "$MIXED_PROXY" "$TEST_URL" 2>/dev/null)
     log "proxy test -> $code"
     [ "$code" = 204 ]
@@ -141,7 +221,11 @@ download() { # download url файл sha256
         fi
         if [ ! -s "$dst" ]; then
             log "download direct: $url"
-            curl -fsSL --connect-timeout 15 --max-time 600 -o "$dst" "$url" >> "$LOG" 2>&1
+            if command -v curl >/dev/null 2>&1; then
+                curl -fsSL --connect-timeout 15 --max-time 600 -o "$dst" "$url" >> "$LOG" 2>&1
+            else
+                wget -q -T 30 -O "$dst" "$url" >> "$LOG" 2>&1
+            fi
         fi
         if [ -s "$dst" ]; then
             got=$(sha256sum "$dst" | awk '{print $1}')
@@ -162,26 +246,18 @@ do_rollback() {
     trap '' INT TERM HUP
     run /etc/init.d/podkop stop
     info "podkop остановлен, интернет работает без VPN"
-    ipk=$(ls "$BACKUP"/sing-box*.ipk "$WORK"/rollback/sing-box*.ipk 2>/dev/null | head -n1)
-    if [ -z "$ipk" ]; then
-        info "Сохранённого пакета нет, скачиваю sing-box из репозитория OpenWrt..."
-        mkdir -p "$WORK/rollback" && cd "$WORK/rollback" || return 1
-        run opkg update
-        run opkg download sing-box-tiny || run opkg download sing-box
-        ipk=$(ls "$WORK"/rollback/sing-box*.ipk 2>/dev/null | head -n1)
-        cd / || true
-    fi
-    if [ -z "$ipk" ]; then
-        err "Не нашёл пакет sing-box для отката. podkop оставлен выключенным — интернет работает, но без VPN."
-        err "Напиши Никите и пришли: sh $0 report"
-        return 1
-    fi
-    pkg_installed podkop-engine && run opkg remove --force-depends podkop-engine
     run /etc/init.d/podkop-engine stop
-    if run opkg install "$ipk"; then
-        ok "Вернул $(basename "$ipk")"
+    pkgf=$(ls "$BACKUP"/sing-box*."$PKG_EXT" "$WORK"/rollback/sing-box*."$PKG_EXT" 2>/dev/null | head -n1)
+    if [ -n "$pkgf" ]; then
+        engine_revert "$pkgf" && ok "Вернул $(basename "$pkgf")"
     else
-        err "Не смог поставить $(basename "$ipk"). podkop выключен, интернет работает без VPN."
+        info "Сохранённого пакета нет, ставлю sing-box из репозитория OpenWrt..."
+        [ "$PM" = apk ] && pm_net update
+        engine_revert && ok "Вернул sing-box-tiny из репозитория"
+    fi
+    if ! sing-box version >/dev/null 2>&1 || sing-box version 2>/dev/null | head -n1 | grep -q pdk; then
+        err "Не получилось вернуть обычный sing-box. podkop выключен, интернет работает без VPN."
+        err "Напиши Никите и пришли: sh $0 report"
         return 1
     fi
     run /etc/init.d/sing-box stop
@@ -210,6 +286,8 @@ do_report() {
         echo "==== podkop-engine report $(date '+%Y-%m-%d %H:%M:%S') (скрипт $SCRIPT_VERSION)"
         echo "Модель: $(cat /tmp/sysinfo/model 2>/dev/null)"
         grep -E 'DISTRIB_(RELEASE|ARCH)' /etc/openwrt_release
+        echo "Менеджер пакетов: $PM"
+        [ "$PM" = apk ] && echo "apk world: $(grep -E 'sing-box|podkop' /etc/apk/world | sed 's/><.*//' | tr '\n' ' ')"
         echo "Аптайм: $(uptime)"
         echo; echo "---- версии"
         for p in podkop luci-app-podkop luci-i18n-podkop-ru podkop-engine sing-box sing-box-tiny; do
@@ -256,9 +334,13 @@ check_router() {
     model=$(cat /tmp/sysinfo/model 2>/dev/null)
     rel=$(sed -n "s/^DISTRIB_RELEASE='\(.*\)'/\1/p" /etc/openwrt_release)
     info "Роутер: ${model:-неизвестно}, OpenWrt $rel"
-    command -v opkg >/dev/null || fail "Нет opkg. Скрипт рассчитан на OpenWrt 24.10 (не 25.x)."
-    case "$rel" in 24.*) ;; *) fail "Нужен OpenWrt 24.10, а стоит $rel." ;; esac
-    opkg print-architecture | grep -q " $ENGINE_ARCH " || fail "Архитектура не $ENGINE_ARCH — скрипт только для Xiaomi AX3000T и подобных."
+    [ -n "$PM" ] || fail "Не нашёл ни opkg, ни apk — это точно OpenWrt?"
+    case "$rel" in
+        24.*|25.*) ok "OpenWrt $rel, пакеты через $PM" ;;
+        *SNAPSHOT*|*snapshot*) warn "Снапшот OpenWrt ($rel) — скрипт проверялся на 24.10 и 25.12, могут быть сюрпризы" ;;
+        *) fail "Скрипт рассчитан на OpenWrt 24.10 и 25.12, а стоит $rel." ;;
+    esac
+    pkg_arch_ok || fail "Архитектура не $ENGINE_ARCH — скрипт только для Xiaomi AX3000T и подобных."
     case "$model" in *AX3000T*) ok "Модель подходит" ;; *) warn "Скрипт проверялся на Xiaomi AX3000T, у тебя «$model» (архитектура подходит)" ;; esac
 
     [ -x /usr/bin/podkop ] || fail "podkop не установлен. Сначала поставь и настрой podkop."
@@ -287,7 +369,8 @@ check_router() {
     info "Свободно памяти: ${mem} МБ (sing-box сейчас занимает ${rss:-0} МБ)"
     [ "$((mem + ${rss:-0}))" -ge 50 ] || fail "Слишком мало свободной памяти ($mem МБ). Пришли Никите: sh $0 report"
 
-    old_kb=$(opkg status "$OLD_SB_PKG" | sed -n 's/^Installed-Size: //p'); old_kb=$(( ${old_kb:-0} / 1024 ))
+    # сколько освободит старый sing-box: размер самого бинарника (opkg status размер не сообщает)
+    old_kb=$(du -k /usr/bin/sing-box 2>/dev/null | awk '{print $1}'); old_kb=${old_kb:-0}
     fl=$(free_kb /overlay)
     need=$((ENGINE_INSTALLED_KB - old_kb + 3000))
     [ "$OLD_SB_PKG" = podkop-engine ] && need=3000
@@ -335,6 +418,16 @@ plan_and_confirm() {
 download_all() {
     step "Скачиваю пакеты и докачиваю зависимости"
     rm -rf "$WORK"; mkdir -p "$WORK/rollback" "$BACKUP"
+
+    info "Обновляю список пакетов OpenWrt..."
+    if pkg_update; then ok "Список пакетов обновлён"; else warn "Список пакетов обновился не полностью (сервер OpenWrt не отвечал) — продолжаю, если всё нужное уже есть"; fi
+    missing=""
+    for d in $PODKOP_DEPS; do pkg_installed "$d" || missing="$missing $d"; done
+    if [ -n "$missing" ]; then
+        info "Ставлю недостающее:$missing"
+        pkg_add_repo $missing || fail "Не поставились зависимости:$missing"
+    fi
+    ok "Зависимости на месте"
     if [ "$OLD_SB_PKG" != podkop-engine ] || [ "$OLD_SB_VER" != "$ENGINE_VER" ]; then
         download "$ENGINE_URL" "$WORK/$ENGINE_FILE" "$ENGINE_SHA" || fail "Не скачался podkop-engine. Интернет не трогал — всё работает как раньше."
         NEED_ENGINE=1
@@ -350,24 +443,11 @@ download_all() {
         fi
     fi
 
-    info "Обновляю список пакетов OpenWrt..."
-    if opkg_net update; then ok "Список пакетов обновлён"; else warn "Список пакетов обновился не полностью (сервер OpenWrt не отвечал) — продолжаю, если всё нужное уже есть"; fi
-    missing=""
-    for d in $PODKOP_DEPS; do pkg_installed "$d" || missing="$missing $d"; done
-    if [ -n "$missing" ]; then
-        info "Ставлю недостающее:$missing"
-        run opkg install $missing || fail "Не поставились зависимости:$missing"
-    fi
-    ok "Зависимости на месте"
 
     if [ "$OLD_SB_PKG" != podkop-engine ]; then
-        saved=$(ls "$BACKUP"/"$OLD_SB_PKG"_*.ipk 2>/dev/null | head -n1)
-        if [ -z "$saved" ]; then
-            cd "$WORK/rollback" || fail "Нет $WORK/rollback"
-            opkg_net download "$OLD_SB_PKG"
-            cd / || true
-        fi
-        rb=$(ls "$WORK"/rollback/"$OLD_SB_PKG"_*.ipk 2>/dev/null | head -n1)
+        saved=$(ls "$BACKUP"/"$OLD_SB_PKG"[-_][0-9]*."$PKG_EXT" 2>/dev/null | head -n1)
+        [ -z "$saved" ] && pkg_fetch "$WORK/rollback" "$OLD_SB_PKG"
+        rb=$(ls "$WORK"/rollback/"$OLD_SB_PKG"[-_][0-9]*."$PKG_EXT" 2>/dev/null | head -n1)
         if [ -n "$saved" ]; then
             ok "Пакет $OLD_SB_PKG для отката уже сохранён: $(basename "$saved")"
         elif [ -n "$rb" ]; then
@@ -382,14 +462,15 @@ download_all() {
 make_backup() {
     step "Сохраняю настройки"
     stamp=$(date +%Y%m%d-%H%M%S)
-    tar czf "$BACKUP/config-$stamp.tar.gz" /etc/config/podkop /etc/config/sing-box /etc/config/dhcp /etc/sing-box 2>> "$LOG" \
+    extra=""; [ "$PM" = apk ] && extra="/etc/apk/world"
+    tar czf "$BACKUP/config-$stamp.tar.gz" /etc/config/podkop /etc/config/sing-box /etc/config/dhcp /etc/sing-box $extra 2>> "$LOG" \
         && ok "Настройки: $BACKUP/config-$stamp.tar.gz" || warn "Архив настроек не создался"
     [ -f /etc/config/sing-box ] && cp /etc/config/sing-box "$BACKUP/sing-box.config"
-    rb=$(ls "$WORK"/rollback/*.ipk 2>/dev/null | head -n1)
+    rb=$(ls "$WORK"/rollback/*."$PKG_EXT" 2>/dev/null | head -n1)
     if [ -n "$rb" ]; then
         sz=$(( $(wc -c < "$rb") / 1024 ))
         if [ "${FLASH_FOR_BACKUP:-0}" -gt $((sz + 2000)) ]; then
-            rm -f "$BACKUP"/sing-box*.ipk; cp "$rb" "$BACKUP/" && ok "Пакет для отката лежит в $BACKUP (переживёт перезагрузку)"
+            rm -f "$BACKUP"/sing-box*.ipk "$BACKUP"/sing-box*.apk; cp "$rb" "$BACKUP/" && ok "Пакет для отката лежит в $BACKUP (переживёт перезагрузку)"
         else
             info "Пакет для отката оставлен в памяти ($WORK) — на флеше мало места"
         fi
@@ -407,11 +488,7 @@ install_all() {
 
     if [ "$NEED_ENGINE" -eq 1 ]; then
         CRITICAL=1
-        if [ "$OLD_SB_PKG" != podkop-engine ]; then
-            run opkg remove --force-depends "$OLD_SB_PKG" || fail "Не удалось снять $OLD_SB_PKG"
-            info "$OLD_SB_PKG снят"
-        fi
-        run opkg install "$WORK/$ENGINE_FILE" || fail "Не установился podkop-engine (подробности в логе)"
+        engine_install "$WORK/$ENGINE_FILE" "$OLD_SB_PKG" || fail "Не установился podkop-engine (подробности в логе)"
         # пакет сам запускает sing-box со старым конфигом — podkop запустит его правильно
         run /etc/init.d/sing-box stop
         run /etc/init.d/sing-box disable
@@ -421,14 +498,14 @@ install_all() {
 
     if [ "$NEED_PODKOP" -eq 1 ]; then
         CRITICAL=1
-        run opkg install "$WORK/$PODKOP_FILE" || fail "Не установился podkop $PODKOP_VER"
-        run opkg install "$WORK/$LUCI_FILE" || warn "Не обновился интерфейс LuCI (podkop при этом работает)"
-        [ "${NEED_RU:-0}" -eq 1 ] && { run opkg install "$WORK/$RU_FILE" || warn "Не встал русский язык LuCI"; }
+        pkg_add_file "$WORK/$PODKOP_FILE" || fail "Не установился podkop $PODKOP_VER"
+        pkg_add_file "$WORK/$LUCI_FILE" || warn "Не обновился интерфейс LuCI (podkop при этом работает)"
+        [ "${NEED_RU:-0}" -eq 1 ] && { pkg_add_file "$WORK/$RU_FILE" || warn "Не встал русский язык LuCI"; }
         ok "podkop $PODKOP_VER установлен"
     fi
 
     if [ "${REMOVE_STATS:-0}" -eq 1 ]; then
-        for p in $STATS_PKGS; do pkg_installed "$p" && run opkg remove "$p"; done
+        for p in $STATS_PKGS; do pkg_installed "$p" && pkg_remove "$p"; done
         ok "Статистика трафика удалена"
     fi
 
@@ -505,7 +582,8 @@ for a in "$@"; do
 done
 
 : > "$LOG"
-log "podkop-engine installer $SCRIPT_VERSION, cmd=$CMD, args=$*"
+detect_pm
+log "podkop-engine installer $SCRIPT_VERSION, cmd=$CMD, args=$*, pm=$PM"
 
 case "$CMD" in
     report) do_report ;;
@@ -517,7 +595,7 @@ case "$CMD" in
     rollback)
         printf "${C_B}Возврат обычного sing-box${C_0}\n"
         ask "Вернуть обычный sing-box вместо podkop-engine?" y || exit 0
-        CRITICAL=1; do_rollback; rc=$?; finish_log; exit $rc ;;
+        mkdir -p "$BACKUP"; CRITICAL=1; do_rollback; rc=$?; finish_log; exit $rc ;;
     install)
         printf "${C_B}Установка podkop-engine %s для podkop${C_0} (скрипт %s)\n" "$ENGINE_VER" "$SCRIPT_VERSION"
         check_router
