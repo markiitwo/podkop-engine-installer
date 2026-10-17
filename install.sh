@@ -11,7 +11,7 @@
 #
 # Ключи: -y (не задавать вопросов), --no-rollback (не откатывать при неудачной проверке)
 
-SCRIPT_VERSION="2.0"
+SCRIPT_VERSION="2.1"
 
 # ---- проверенные версии (обновлять вместе) ---------------------------------
 ENGINE_VER="1.14.2-r14"
@@ -101,7 +101,11 @@ fail() { # fail "сообщение" — остановка; откат, есл�
         fi
     fi
     finish_log
-    printf "\n${C_R}Установка не удалась.${C_0} Лог: %s\n" "$BACKUP/install.log"
+    if [ "$CMD" = check ]; then
+        printf "\n${C_R}Проверка не прошла.${C_0} Ничего не менял. Лог: %s\n" "$BACKUP/install.log"
+    else
+        printf "\n${C_R}Установка не удалась.${C_0} Лог: %s\n" "$BACKUP/install.log"
+    fi
     printf "Для помощи: ${C_B}sh %s report${C_0} — и пришли результат.\n" "$0"
     exit 1
 }
@@ -142,10 +146,15 @@ pkg_ver() {
     if [ "$PM" = apk ]; then apk list -I "$1" 2>/dev/null | awk -v n="$1" 'index($1, n"-")==1 {print substr($1, length(n)+2); exit}'
     else opkg status "$1" 2>/dev/null | sed -n 's/^Version: //p'; fi
 }
-pkg_arch_ok() {
-    if [ "$PM" = apk ]; then [ "$(apk --print-arch 2>/dev/null)" = "$ENGINE_ARCH" ]
-    else opkg print-architecture 2>/dev/null | grep -q " $ENGINE_ARCH "; fi
+# все архитектуры, которые знает система (apk может выдавать несколько строк, opkg — список с приоритетами)
+sys_archs() {
+    {
+        if [ "$PM" = apk ]; then apk --print-arch 2>/dev/null; cat /etc/apk/arch 2>/dev/null
+        else opkg print-architecture 2>/dev/null | awk '{print $2}'; fi
+        sed -n "s/^DISTRIB_ARCH='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null
+    } | tr -d '\r' | tr ' ' '\n' | grep -v '^$' | sort -u
 }
+pkg_arch_ok() { sys_archs | grep -qx "$ENGINE_ARCH"; }
 pkg_update() { pm_net update; }
 pkg_add_repo() { # поставить из репозитория OpenWrt
     if [ "$PM" = apk ]; then run apk add "$@"; else run opkg install "$@"; fi
@@ -340,7 +349,8 @@ check_router() {
         *SNAPSHOT*|*snapshot*) warn "Снапшот OpenWrt ($rel) — скрипт проверялся на 24.10 и 25.12, могут быть сюрпризы" ;;
         *) fail "Скрипт рассчитан на OpenWrt 24.10 и 25.12, а стоит $rel." ;;
     esac
-    pkg_arch_ok || fail "Архитектура не $ENGINE_ARCH — скрипт только для Xiaomi AX3000T и подобных."
+    log "архитектуры системы: $(sys_archs | tr '\n' ' ')"
+    pkg_arch_ok || fail "Архитектура не $ENGINE_ARCH (система сообщает: $(sys_archs | tr '\n' ' ')) — скрипт только для Xiaomi AX3000T и подобных."
     case "$model" in *AX3000T*) ok "Модель подходит" ;; *) warn "Скрипт проверялся на Xiaomi AX3000T, у тебя «$model» (архитектура подходит)" ;; esac
 
     [ -x /usr/bin/podkop ] || fail "podkop не установлен. Сначала поставь и настрой podkop."
