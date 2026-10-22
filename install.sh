@@ -11,7 +11,7 @@
 #
 # Ключи: -y (не задавать вопросов), --no-rollback (не откатывать при неудачной проверке)
 
-SCRIPT_VERSION="2.2"
+SCRIPT_VERSION="2.3"
 
 # ---- проверенные версии (обновлять вместе) ---------------------------------
 ENGINE_VER="1.14.2-r14"
@@ -97,10 +97,11 @@ feeds_restore() {
     cp "$WORK/feeds.orig" "$(feeds_file)" && rm -f "$WORK/feeds.orig" && log "фиды возвращены на downloads.openwrt.org"
 }
 
-# сетевые команды менеджера пакетов: сервер OpenWrt → зеркало → через VPN podkop; у каждой попытки тайм-аут
+# сетевые команды менеджера пакетов: сервер OpenWrt → зеркало → через VPN podkop; у каждой попытки тайм-аут.
+# PM_NO_MIRROR=1 — без зеркала (для скачивания файлов, которые потом ставятся без проверки подписи)
 pm_net() {
     run_to 90 "$PM" "$@" && return 0
-    if feeds_to_mirror; then
+    if [ "${PM_NO_MIRROR:-0}" != 1 ] && feeds_to_mirror; then
         info "Сервер OpenWrt не ответил, пробую зеркало..."
         run_to 90 "$PM" "$@"; rc=$?
         feeds_restore
@@ -204,8 +205,10 @@ pkg_remove() {
     if [ "$PM" = apk ]; then run apk del "$@"; else run opkg remove "$@"; fi
 }
 pkg_fetch() { # скачать пакет из репозитория в каталог: pkg_fetch каталог имя
-    if [ "$PM" = apk ]; then pm_net fetch -o "$1" "$2"
-    else ( cd "$1" && pm_net download "$2" ); fi
+    # копия для отката потом ставится из файла (apk --allow-untrusted / opkg без проверки подписи),
+    # поэтому качаем её только с официального сервера OpenWrt, никогда через зеркало
+    if [ "$PM" = apk ]; then PM_NO_MIRROR=1 pm_net fetch -o "$1" "$2"
+    else ( cd "$1" && PM_NO_MIRROR=1 pm_net download "$2" ); fi
 }
 # engine вместо sing-box. opkg: снять старый, поставить новый. apk: одной транзакцией, но сначала
 # убрать из /etc/apk/world старые записи (иначе конфликт: !sing-box блокирует сам engine,
