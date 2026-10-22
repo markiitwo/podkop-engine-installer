@@ -248,13 +248,15 @@ resolve_versions() {
     prel=$(api_get "https://api.github.com/repos/$PODKOP_REPO/releases/latest") || { log "versions: podkop API failed"; VERSION_SOURCE=pinned-fallback; return 0; }
     pver=$(printf '%s' "$prel" | jq -r '.tag_name' 2>>"$LOG" | sed 's/^v//')
     assets=$(printf '%s' "$prel" | jq -r '.assets[] | "\(.name) \(.digest // "") \(.browser_download_url)"' 2>>"$LOG")
+    case "$pver" in *[!0-9.]*|"") log "versions: unexpected podkop tag '$pver'"; VERSION_SOURCE=pinned-fallback; return 0 ;; esac
+    pver_re=$(printf '%s' "$pver" | sed 's/\./\\./g')
     if [ "$PM" = apk ]; then
-        p=$(echo "$assets" | grep -E "^podkop-v?$pver-r[0-9]+\.apk sha256:" | head -n1)
-        l=$(echo "$assets" | grep -E "^luci-app-podkop-v?$pver-r[0-9]+\.apk sha256:" | head -n1)
+        p=$(echo "$assets" | grep -E "^podkop-v?$pver_re-r[0-9]+\.apk sha256:" | head -n1)
+        l=$(echo "$assets" | grep -E "^luci-app-podkop-v?$pver_re-r[0-9]+\.apk sha256:" | head -n1)
         r=$(echo "$assets" | grep -E "^luci-i18n-podkop-ru-[^ ]*\.apk sha256:" | head -n1)
     else
-        p=$(echo "$assets" | grep -E "^podkop-v?$pver-r[0-9]+(-all)?\.ipk sha256:" | head -n1)
-        l=$(echo "$assets" | grep -E "^luci-app-podkop-v?$pver-r[0-9]+(-all)?\.ipk sha256:" | head -n1)
+        p=$(echo "$assets" | grep -E "^podkop-v?$pver_re-r[0-9]+(-all)?\.ipk sha256:" | head -n1)
+        l=$(echo "$assets" | grep -E "^luci-app-podkop-v?$pver_re-r[0-9]+(-all)?\.ipk sha256:" | head -n1)
         r=$(echo "$assets" | grep -E "^luci-i18n-podkop-ru-[^ ]*\.ipk sha256:" | head -n1)
     fi
     { [ -n "$pver" ] && [ -n "$p" ] && [ -n "$l" ]; } || { log "versions: podkop assets not found for $pver"; VERSION_SOURCE=pinned-fallback; return 0; }
