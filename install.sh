@@ -11,7 +11,7 @@
 #
 # Ключи: -y (не задавать вопросов), --no-rollback (не откатывать при неудачной проверке)
 
-SCRIPT_VERSION="2.1"
+SCRIPT_VERSION="2.2"
 
 # ---- проверенные версии (обновлять вместе) ---------------------------------
 ENGINE_VER="1.14.2-r14"
@@ -67,12 +67,48 @@ err()  { printf "  ${C_R}✗${C_0} %s\n" "$*"; log "ERROR: $*"; }
 # команда с выводом только в лог
 run() { log "\$ $*"; "$@" >> "$LOG" 2>&1; rc=$?; [ $rc -ne 0 ] && log "(код $rc)"; return $rc; }
 
-# сетевые команды менеджера пакетов с повторами; при неудаче — через VPN podkop
+# команда с ограничением по времени: run_to секунд команда... (busybox timeout есть не везде)
+run_to() {
+    t=$1; shift
+    log "\$ (до ${t}с) $*"
+    "$@" >> "$LOG" 2>&1 &
+    cmd_pid=$!
+    ( sleep "$t"; if kill -0 "$cmd_pid" 2>/dev/null; then echo "[$(date '+%H:%M:%S')] (прервано по тайм-ауту ${t}с)" >> "$LOG"; kill "$cmd_pid" 2>/dev/null; fi ) &
+    watch_pid=$!
+    wait "$cmd_pid"; rc=$?
+    kill "$watch_pid" 2>/dev/null; wait "$watch_pid" 2>/dev/null
+    [ $rc -ne 0 ] && log "(код $rc)"
+    return $rc
+}
+
+# зеркало на случай, когда downloads.openwrt.org (Fastly) у провайдера тормозит или режется;
+# подписи пакетов apk/opkg проверяют сами, зеркало ничего подменить не может
+OPENWRT_MIRROR="https://mirrors.cicku.me/openwrt"
+feeds_file() { if [ "$PM" = apk ]; then echo /etc/apk/repositories.d/distfeeds.list; else echo /etc/opkg/distfeeds.conf; fi; }
+feeds_to_mirror() {
+    f=$(feeds_file); [ -f "$f" ] || return 1
+    grep -q "downloads.openwrt.org" "$f" || return 1
+    cp "$f" "$WORK/feeds.orig" || return 1
+    sed -i -E "s#https?://downloads\.openwrt\.org#$OPENWRT_MIRROR#g" "$f"
+    log "фиды временно переключены на зеркало $OPENWRT_MIRROR"
+}
+feeds_restore() {
+    [ -f "$WORK/feeds.orig" ] || return 0
+    cp "$WORK/feeds.orig" "$(feeds_file)" && rm -f "$WORK/feeds.orig" && log "фиды возвращены на downloads.openwrt.org"
+}
+
+# сетевые команды менеджера пакетов: сервер OpenWrt → зеркало → через VPN podkop; у каждой попытки тайм-аут
 pm_net() {
-    for try in 1 2; do run "$PM" "$@" && return 0; sleep 3; done
+    run_to 90 "$PM" "$@" && return 0
+    if feeds_to_mirror; then
+        info "Сервер OpenWrt не ответил, пробую зеркало..."
+        run_to 90 "$PM" "$@"; rc=$?
+        feeds_restore
+        [ $rc -eq 0 ] && return 0
+    fi
     if proxy_up; then
         log "$PM $* через podkop"
-        ( export http_proxy="$MIXED_PROXY" https_proxy="$MIXED_PROXY"; run "$PM" "$@" ) && return 0
+        ( export http_proxy="$MIXED_PROXY" https_proxy="$MIXED_PROXY"; run_to 90 "$PM" "$@" ) && return 0
     fi
     return 1
 }
@@ -92,6 +128,7 @@ ask() { # ask "вопрос" default(y|n)
 
 fail() { # fail "сообщение" — остановка; откат, если уже меняли sing-box
     err "$1"
+    feeds_restore 2>/dev/null
     if [ "$CRITICAL" -eq 1 ]; then
         if [ "$AUTO_ROLLBACK" -eq 1 ]; then
             warn "Возвращаю всё как было..."
@@ -113,6 +150,7 @@ fail() { # fail "сообщение" — остановка; откат, есл�
 finish_log() { mkdir -p "$BACKUP" 2>/dev/null && cp "$LOG" "$BACKUP/install.log" 2>/dev/null; }
 
 on_signal() {
+    feeds_restore 2>/dev/null
     log "получен сигнал прерывания"
     printf "\n"
     fail "Установка прервана."
@@ -428,12 +466,14 @@ plan_and_confirm() {
 download_all() {
     step "Скачиваю пакеты и докачиваю зависимости"
     rm -rf "$WORK"; mkdir -p "$WORK/rollback" "$BACKUP"
+    trap on_signal INT TERM     # Ctrl+C здесь безопасен: вернём фиды и выйдем, ничего не меняя
 
-    info "Обновляю список пакетов OpenWrt..."
-    if pkg_update; then ok "Список пакетов обновлён"; else warn "Список пакетов обновился не полностью (сервер OpenWrt не отвечал) — продолжаю, если всё нужное уже есть"; fi
+    LISTS_FRESH=0
     missing=""
     for d in $PODKOP_DEPS; do pkg_installed "$d" || missing="$missing $d"; done
     if [ -n "$missing" ]; then
+        info "Не хватает:$missing — обновляю список пакетов OpenWrt (до 3 минут)..."
+        pkg_update && LISTS_FRESH=1 || fail "Сервер пакетов OpenWrt не отвечает — не могу поставить:$missing. Попробуй позже."
         info "Ставлю недостающее:$missing"
         pkg_add_repo $missing || fail "Не поставились зависимости:$missing"
     fi
@@ -456,7 +496,12 @@ download_all() {
 
     if [ "$OLD_SB_PKG" != podkop-engine ]; then
         saved=$(ls "$BACKUP"/"$OLD_SB_PKG"[-_][0-9]*."$PKG_EXT" 2>/dev/null | head -n1)
-        [ -z "$saved" ] && pkg_fetch "$WORK/rollback" "$OLD_SB_PKG"
+        if [ -z "$saved" ]; then
+            info "Сохраняю копию $OLD_SB_PKG для отката (до 3 минут)..."
+            pkg_fetch "$WORK/rollback" "$OLD_SB_PKG" || {
+                [ "$LISTS_FRESH" -eq 0 ] && pkg_update && pkg_fetch "$WORK/rollback" "$OLD_SB_PKG"
+            }
+        fi
         rb=$(ls "$WORK"/rollback/"$OLD_SB_PKG"[-_][0-9]*."$PKG_EXT" 2>/dev/null | head -n1)
         if [ -n "$saved" ]; then
             ok "Пакет $OLD_SB_PKG для отката уже сохранён: $(basename "$saved")"
