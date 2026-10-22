@@ -11,7 +11,7 @@
 #
 # Ключи: -y (не задавать вопросов), --no-rollback (не откатывать при неудачной проверке)
 
-SCRIPT_VERSION="2.3"
+SCRIPT_VERSION="2.4"
 
 # ---- проверенные версии (обновлять вместе) ---------------------------------
 ENGINE_VER="1.14.2-r14"
@@ -144,7 +144,7 @@ fail() { # fail "сообщение" — остановка; откат, есл�
     else
         printf "\n${C_R}Установка не удалась.${C_0} Лог: %s\n" "$BACKUP/install.log"
     fi
-    printf "Для помощи: ${C_B}sh %s report${C_0} — и пришли результат.\n" "$0"
+    printf "Диагностика: ${C_B}sh %s report${C_0}\n" "$0"
     exit 1
 }
 
@@ -307,7 +307,7 @@ do_rollback() {
     fi
     if ! sing-box version >/dev/null 2>&1 || sing-box version 2>/dev/null | head -n1 | grep -q pdk; then
         err "Не получилось вернуть обычный sing-box. podkop выключен, интернет работает без VPN."
-        err "Напиши Никите и пришли: sh $0 report"
+        err "Диагностика: sh $0 report"
         return 1
     fi
     run /etc/init.d/sing-box stop
@@ -373,7 +373,7 @@ do_report() {
     } 2>&1 | redact > "$REPORT"
     cat "$REPORT"
     printf "\n${C_G}Отчёт сохранён:${C_0} %s\n" "$REPORT"
-    echo "Ключи, пароли и UUID в нём заменены звёздочками. Скопируй текст выше или файл и пришли Никите."
+    echo "Ссылки на прокси, ключи, пароли и UUID в нём заменены на ***. Внешний IP и домены из журналов остаются."
 }
 
 # ---- шаги установки ----------------------------------------------------------
@@ -418,7 +418,7 @@ check_router() {
 
     mem=$(mem_avail_mb); rss=$(singbox_rss_mb)
     info "Свободно памяти: ${mem} МБ (sing-box сейчас занимает ${rss:-0} МБ)"
-    [ "$((mem + ${rss:-0}))" -ge 50 ] || fail "Слишком мало свободной памяти ($mem МБ). Пришли Никите: sh $0 report"
+    [ "$((mem + ${rss:-0}))" -ge 50 ] || fail "Слишком мало свободной памяти ($mem МБ, нужно не меньше 50 с учётом sing-box)."
 
     # сколько освободит старый sing-box: размер самого бинарника (opkg status размер не сообщает)
     old_kb=$(du -k /usr/bin/sing-box 2>/dev/null | awk '{print $1}'); old_kb=${old_kb:-0}
@@ -618,7 +618,7 @@ summary() {
     info "Включено: запасной DNS провайдера, проверка сервера скачиванием, защита от зависания sing-box"
     echo
     echo "  Если что-то не так:"
-    echo "    sh $0 report     — отчёт для Никиты (без ключей)"
+    echo "    sh $0 report     — отчёт для диагностики (без ключей)"
     echo "    sh $0 rollback   — вернуть обычный sing-box"
     echo "  Лог установки: $BACKUP/install.log"
 }
